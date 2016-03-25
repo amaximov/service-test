@@ -2,7 +2,6 @@ import com.google.common.collect.Lists;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
-import org.apache.curator.framework.recipes.leader.LeaderSelectorListener;
 import org.apache.curator.framework.recipes.leader.LeaderSelectorListenerAdapter;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.test.TestingServer;
@@ -26,34 +25,49 @@ public class ServiceMain {
 
         TestingServer server = new TestingServer();
         for (int i = 0; i < CLIENT_COUNT; i++) {
-            CuratorFramework client = CuratorFrameworkFactory.newClient(server.getConnectString(), new ExponentialBackoffRetry(1000, 3));
-            clients.add(client);
-            client.start();
-
-            final int finalI = i;
-            LeaderSelectorListener listener = new LeaderSelectorListenerAdapter() {
-                private final Scheduler scheduler = new Scheduler(finalI);
-
-                @Override
-                public void takeLeadership(CuratorFramework client) throws Exception {
-                    LOG.info("i am a leader now: {} with id {}", this, finalI);
-                    scheduler.start();
-
-                    // in real world, leadership will never be taken away, only jvm death will do it
-                    System.out.println("\nPress Enter to make me lose leadership: \n");
-                    System.in.read(); // blocking wait; probably entered at startup and remain here until jvm shutdown
-                    // in real world, Thread.currentThread().join() miht work as well
-
-                    scheduler.standby(); // can wait for scheduled tasks to complete before relinquishing
-                    // should also implement bean pre-destroy to cleanly shut down and relinquish leadership
-                }
-            };
-
-            LeaderSelector selector = new LeaderSelector(client, PATH, listener);
-            selector.autoRequeue(); // not in real code, since takeLeadership() will never return in usual circumstances
-            selector.start();
+            clients.add(startNewClient(server, i));
         }
 
         LOG.info("{} clients started: {}", clients.size(), clients);
+
+        // imitating late join to verify singleton service stickiness
+        Thread.sleep(15000);
+        LOG.info("starting another client (service):");
+        clients.add(startNewClient(server, Integer.MIN_VALUE));
+    }
+
+    private static CuratorFramework startNewClient(TestingServer server, int i) {
+        CuratorFramework client = CuratorFrameworkFactory.newClient(server.getConnectString(), new ExponentialBackoffRetry(1000, 3));
+        client.start();
+
+        LeaderSelector selector = new LeaderSelector(client, PATH, new SchedulerService(i));
+        selector.autoRequeue(); // not in real code, since takeLeadership() will never return in usual circumstances
+        selector.start();
+
+        return client;
+    }
+
+    private static final class SchedulerService extends LeaderSelectorListenerAdapter {
+        private final int id;
+        private final Scheduler scheduler;
+
+        private SchedulerService(int id) {
+            this.id = id;
+            this.scheduler = new Scheduler(id);
+        }
+
+        @Override
+        public void takeLeadership(CuratorFramework client) throws Exception {
+            LOG.info("i am a leader now: {} with id {}", this, id);
+            scheduler.start();
+
+            // in real world, leadership will never be taken away, only jvm death will do it
+            System.out.println("\nPress Enter to make me lose leadership: \n");
+            System.in.read(); // blocking wait; probably entered at startup and remain here until jvm shutdown
+            // in real world, Thread.currentThread().join() might work as well
+
+            scheduler.standby(); // can wait for scheduled tasks to complete before relinquishing
+            // should also implement bean pre-destroy to cleanly shut down and relinquish leadership
+        }
     }
 }
